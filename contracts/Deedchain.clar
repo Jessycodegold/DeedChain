@@ -46,7 +46,7 @@
 
 ;; Property metadata - stores comprehensive property information
 (define-map property-metadata
-  (property-id uint)
+  uint
   (tuple
     (property-title (string-ascii 100))
     (property-description (string-ascii 500))
@@ -62,14 +62,13 @@
 
 ;; Property ownership
 (define-map property-owner
-  (property-id uint)
-  (owner principal)
+  uint
+  principal
 )
 
-;; Property transfer history
+;; Property transfer history - using composite key
 (define-map property-transfers
-  (property-id uint)
-  (transfer-id uint)
+  (tuple (property-id uint) (transfer-id uint))
   (tuple
     (from-owner principal)
     (to-owner principal)
@@ -81,20 +80,19 @@
 
 ;; Transfer counter per property
 (define-map property-transfer-counter
-  (property-id uint)
-  (counter uint)
+  uint
+  uint
 )
 
 ;; Owner properties index
 (define-map owner-properties
-  (owner principal)
-  (property-id uint)
-  (is-active bool)
+  (tuple (owner principal) (property-id uint))
+  bool
 )
 
 ;; Property verification status
 (define-map property-verification
-  (property-id uint)
+  uint
   (tuple
     (is-verified bool)
     (verified-by principal)
@@ -103,10 +101,9 @@
   )
 )
 
-;; Property documents and attachments
+;; Property documents and attachments - using composite key
 (define-map property-documents
-  (property-id uint)
-  (document-id uint)
+  (tuple (property-id uint) (document-id uint))
   (tuple
     (document-title (string-ascii 100))
     (document-type (string-ascii 50))
@@ -119,14 +116,13 @@
 
 ;; Document counter per property
 (define-map property-document-counter
-  (property-id uint)
-  (counter uint)
+  uint
+  uint
 )
 
-;; Property status change history
+;; Property status change history - using composite key
 (define-map property-status-history
-  (property-id uint)
-  (change-id uint)
+  (tuple (property-id uint) (change-id uint))
   (tuple
     (old-status uint)
     (new-status uint)
@@ -138,14 +134,13 @@
 
 ;; Status change counter per property
 (define-map property-status-counter
-  (property-id uint)
-  (counter uint)
+  uint
+  uint
 )
 
-;; Access control for properties
+;; Access control for properties - using composite key
 (define-map property-access-control
-  (property-id uint)
-  (accessor principal)
+  (tuple (property-id uint) (accessor principal))
   (tuple
     (access-level uint)
     (granted-by principal)
@@ -157,16 +152,14 @@
 
 ;; Property search index by location
 (define-map property-location-index
-  (location (string-ascii 200))
-  (property-id uint)
-  (is-active bool)
+  (tuple (location (string-ascii 200)) (property-id uint))
+  bool
 )
 
 ;; Property search index by type
 (define-map property-type-index
-  (property-type (string-ascii 50))
-  (property-id uint)
-  (is-active bool)
+  (tuple (property-type (string-ascii 50)) (property-id uint))
+  bool
 )
 
 ;; System statistics
@@ -182,36 +175,43 @@
 (define-private (generate-property-id)
   (let ((current-counter (var-get property-counter)))
     (var-set property-counter (+ current-counter u1))
-    current-counter
-))
+    (+ current-counter u1)
+  )
+)
 
 ;; Generate unique transfer ID for a property
 (define-private (generate-transfer-id (property-id uint))
-  (let ((current-counter (map-get? property-transfer-counter property-id)))
-    (let ((new-counter (if (is-none current-counter) u1 (+ (unwrap current-counter) u1))))
+  (let ((current-counter (default-to u0 (map-get? property-transfer-counter property-id))))
+    (let ((new-counter (+ current-counter u1)))
       (map-set property-transfer-counter property-id new-counter)
       new-counter
-)))
+    )
+  )
+)
 
 ;; Generate unique document ID for a property
 (define-private (generate-document-id (property-id uint))
-  (let ((current-counter (map-get? property-document-counter property-id)))
-    (let ((new-counter (if (is-none current-counter) u1 (+ (unwrap current-counter) u1))))
+  (let ((current-counter (default-to u0 (map-get? property-document-counter property-id))))
+    (let ((new-counter (+ current-counter u1)))
       (map-set property-document-counter property-id new-counter)
       new-counter
-)))
+    )
+  )
+)
 
 ;; Generate unique status change ID for a property
 (define-private (generate-status-change-id (property-id uint))
-  (let ((current-counter (map-get? property-status-counter property-id)))
-    (let ((new-counter (if (is-none current-counter) u1 (+ (unwrap current-counter) u1))))
+  (let ((current-counter (default-to u0 (map-get? property-status-counter property-id))))
+    (let ((new-counter (+ current-counter u1)))
       (map-set property-status-counter property-id new-counter)
       new-counter
-)))
+    )
+  )
+)
 
 ;; Check if principal is authorized to perform operations
 (define-private (is-authorized (caller principal))
-  (is-eq caller (as-contract tx-sender))
+  (is-eq caller tx-sender)
 )
 
 ;; Validate property data
@@ -253,7 +253,7 @@
   (let ((owner (get-property-owner property-id)))
     (if (is-none owner)
       false
-      (is-eq (unwrap owner) caller)
+      (is-eq (unwrap-panic owner) caller)
     )
   )
 )
@@ -262,13 +262,15 @@
 (define-private (update-property-timestamp (property-id uint))
   (let ((metadata (map-get? property-metadata property-id)))
     (if (is-some metadata)
-      (let ((current-metadata (unwrap metadata)))
+      (let ((current-metadata (unwrap-panic metadata)))
         (map-set property-metadata property-id
           (merge current-metadata
-            (tuple (last-modified (get-current-block-height)))
+            {last-modified: (get-current-block-height)}
           )
         )
+        true
       )
+      false
     )
   )
 )
@@ -283,14 +285,15 @@
 )
   (let ((transfer-id (generate-transfer-id property-id))
         (current-time (get-current-block-height)))
-    (map-set property-transfers property-id transfer-id
-      (tuple
-        (from-owner from-owner)
-        (to-owner to-owner)
-        (transfer-date current-time)
-        (transfer-reason reason)
-        (transfer-amount amount)
-      )
+    (map-set property-transfers 
+      {property-id: property-id, transfer-id: transfer-id}
+      {
+        from-owner: from-owner,
+        to-owner: to-owner,
+        transfer-date: current-time,
+        transfer-reason: reason,
+        transfer-amount: amount
+      }
     )
     transfer-id
   )
@@ -302,10 +305,13 @@
   (new-owner principal)
   (property-id uint)
 )
-  ;; Remove from old owner
-  (map-set owner-properties old-owner property-id false)
-  ;; Add to new owner
-  (map-set owner-properties new-owner property-id true)
+  (begin
+    ;; Remove from old owner
+    (map-set owner-properties {owner: old-owner, property-id: property-id} false)
+    ;; Add to new owner
+    (map-set owner-properties {owner: new-owner, property-id: property-id} true)
+    true
+  )
 )
 
 ;; Record status change
@@ -318,14 +324,15 @@
 )
   (let ((change-id (generate-status-change-id property-id))
         (current-time (get-current-block-height)))
-    (map-set property-status-history property-id change-id
-      (tuple
-        (old-status old-status)
-        (new-status new-status)
-        (change-date current-time)
-        (changed-by changed-by)
-        (change-reason reason)
-      )
+    (map-set property-status-history 
+      {property-id: property-id, change-id: change-id}
+      {
+        old-status: old-status,
+        new-status: new-status,
+        change-date: current-time,
+        changed-by: changed-by,
+        change-reason: reason
+      }
     )
     change-id
   )
@@ -333,37 +340,39 @@
 
 ;; Validate status transition
 (define-private (is-valid-status-transition (old-status uint) (new-status uint))
-  (cond
+  (if (is-eq old-status STATUS-ACTIVE)
     ;; Active can transition to any status
-    ((is-eq old-status STATUS-ACTIVE) true)
-    ;; Pending can transition to Active or Suspended
-    ((is-eq old-status STATUS-PENDING) 
-     (or (is-eq new-status STATUS-ACTIVE) (is-eq new-status STATUS-SUSPENDED)))
-    ;; Suspended can transition to Active or Archived
-    ((is-eq old-status STATUS-SUSPENDED)
-     (or (is-eq new-status STATUS-ACTIVE) (is-eq new-status STATUS-ARCHIVED)))
-    ;; Archived cannot transition (final state)
-    ((is-eq old-status STATUS-ARCHIVED) false)
-    ;; Default case
-    (true false)
+    true
+    (if (is-eq old-status STATUS-PENDING)
+      ;; Pending can transition to Active or Suspended
+      (or (is-eq new-status STATUS-ACTIVE) (is-eq new-status STATUS-SUSPENDED))
+      (if (is-eq old-status STATUS-SUSPENDED)
+        ;; Suspended can transition to Active or Archived
+        (or (is-eq new-status STATUS-ACTIVE) (is-eq new-status STATUS-ARCHIVED))
+        (if (is-eq old-status STATUS-ARCHIVED)
+          ;; Archived cannot transition (final state)
+          false
+          ;; Default case
+          false
+        )
+      )
+    )
   )
 )
 
 ;; Check access level for property
 (define-private (has-access-level (property-id uint) (caller principal) (required-level uint))
-  (cond
+  (if (is-property-owner property-id caller)
     ;; Owner has full access
-    ((is-property-owner property-id caller) true)
+    true
     ;; Check specific access control
-    (true
-      (let ((access-control (map-get? property-access-control property-id caller)))
-        (if (is-none access-control)
-          false
-          (let ((access-info (unwrap access-control)))
-            (and
-              (get is-active access-info)
-              (>= (get access-level access-info) required-level)
-            )
+    (let ((access-control (map-get? property-access-control {property-id: property-id, accessor: caller})))
+      (if (is-none access-control)
+        false
+        (let ((access-info (unwrap-panic access-control)))
+          (and
+            (get is-active access-info)
+            (>= (get access-level access-info) required-level)
           )
         )
       )
@@ -373,15 +382,22 @@
 
 ;; Update search indexes
 (define-private (update-search-indexes (property-id uint) (location (string-ascii 200)) (property-type (string-ascii 50)) (is-active bool))
-  (map-set property-location-index location property-id is-active)
-  (map-set property-type-index property-type property-id is-active)
+  (begin
+    (map-set property-location-index {location: location, property-id: property-id} is-active)
+    (map-set property-type-index {property-type: property-type, property-id: property-id} is-active)
+    true
+  )
 )
 
 ;; Update system statistics
 (define-private (update-statistics (property-id uint) (is-verified bool))
-  (var-set total-properties (+ (var-get total-properties) u1))
-  (if is-verified
-    (var-set total-verified-properties (+ (var-get total-verified-properties) u1))
+  (begin
+    (var-set total-properties (+ (var-get total-properties) u1))
+    (if is-verified
+      (var-set total-verified-properties (+ (var-get total-verified-properties) u1))
+      true
+    )
+    true
   )
 )
 
@@ -400,41 +416,38 @@
   (initial-owner principal)
 )
   (let ((caller tx-sender))
-    (if (not (is-authorized caller))
-      (err ERR-UNAUTHORIZED)
-      (if (not (validate-property-data title description location property-type total-area area-unit))
-        (err ERR-INVALID-PROPERTY-DATA)
-        (let ((property-id (generate-property-id))
-              (current-time (get-current-block-height)))
-          (map-set property-metadata property-id
-            (tuple
-              (property-title title)
-              (property-description description)
-              (location location)
-              (property-type property-type)
-              (total-area total-area)
-              (area-unit area-unit)
-              (registration-date current-time)
-              (last-modified current-time)
-              (status STATUS-ACTIVE)
-            )
-          )
-          (map-set property-owner property-id initial-owner)
-          (map-set owner-properties initial-owner property-id true)
-          (map-set property-verification property-id
-            (tuple
-              (is-verified false)
-              (verified-by (as-contract tx-sender))
-              (verification-date u0)
-              (verification-notes "")
-            )
-          )
-          ;; Update search indexes
-          (update-search-indexes property-id location property-type true)
-          ;; Update statistics
-          (update-statistics property-id false)
-          (ok property-id)
+    (if (not (validate-property-data title description location property-type total-area area-unit))
+      (err ERR-INVALID-PROPERTY-DATA)
+      (let ((property-id (generate-property-id))
+            (current-time (get-current-block-height)))
+        (map-set property-metadata property-id
+          {
+            property-title: title,
+            property-description: description,
+            location: location,
+            property-type: property-type,
+            total-area: total-area,
+            area-unit: area-unit,
+            registration-date: current-time,
+            last-modified: current-time,
+            status: STATUS-ACTIVE
+          }
         )
+        (map-set property-owner property-id initial-owner)
+        (map-set owner-properties {owner: initial-owner, property-id: property-id} true)
+        (map-set property-verification property-id
+          {
+            is-verified: false,
+            verified-by: tx-sender,
+            verification-date: u0,
+            verification-notes: ""
+          }
+        )
+        ;; Update search indexes
+        (update-search-indexes property-id location property-type true)
+        ;; Update statistics
+        (update-statistics property-id false)
+        (ok property-id)
       )
     )
   )
@@ -454,7 +467,7 @@
         (err ERR-UNAUTHORIZED)
         (if (is-eq caller new-owner)
           (err ERR-INVALID-OWNER)
-          (let ((current-owner (unwrap (get-property-owner property-id))))
+          (let ((current-owner (unwrap-panic (get-property-owner property-id))))
             ;; Record the transfer
             (record-transfer property-id current-owner new-owner reason amount)
             ;; Update ownership
@@ -474,38 +487,38 @@
 )
 
 ;; Get property information
-(define-public (get-property-info (property-id uint))
+(define-read-only (get-property-info (property-id uint))
   (let ((metadata (map-get? property-metadata property-id))
         (owner (get-property-owner property-id)))
     (if (is-none metadata)
       (err ERR-PROPERTY-NOT-FOUND)
-      (ok (tuple
-        (property-id property-id)
-        (metadata (unwrap metadata))
-        (owner (unwrap owner))
-      ))
+      (ok {
+        property-id: property-id,
+        metadata: (unwrap-panic metadata),
+        owner: (unwrap-panic owner)
+      })
     )
   )
 )
 
 ;; Get property owner
-(define-public (get-property-owner-public (property-id uint))
+(define-read-only (get-property-owner-public (property-id uint))
   (let ((owner (get-property-owner property-id)))
     (if (is-none owner)
       (err ERR-PROPERTY-NOT-FOUND)
-      (ok (unwrap owner))
+      (ok (unwrap-panic owner))
     )
   )
 )
 
 ;; Check if address owns property
-(define-public (owns-property (property-id uint) (address principal))
+(define-read-only (owns-property (property-id uint) (address principal))
   (ok (is-property-owner property-id address))
 )
 
 ;; Get properties owned by an address
-(define-public (get-owner-properties (owner principal))
-  (ok (map-get? owner-properties owner))
+(define-read-only (get-owner-properties-public (owner principal) (property-id uint))
+  (ok (default-to false (map-get? owner-properties {owner: owner, property-id: property-id})))
 )
 
 ;; Update property metadata (only by owner)
@@ -525,18 +538,18 @@
         (err ERR-UNAUTHORIZED)
         (if (not (validate-property-data new-title new-description new-location new-property-type new-total-area new-area-unit))
           (err ERR-INVALID-PROPERTY-DATA)
-          (let ((current-metadata (unwrap (map-get? property-metadata property-id))))
+          (let ((current-metadata (unwrap-panic (map-get? property-metadata property-id))))
             (map-set property-metadata property-id
               (merge current-metadata
-                (tuple
-                  (property-title new-title)
-                  (property-description new-description)
-                  (location new-location)
-                  (property-type new-property-type)
-                  (total-area new-total-area)
-                  (area-unit new-area-unit)
-                  (last-modified (get-current-block-height))
-                )
+                {
+                  property-title: new-title,
+                  property-description: new-description,
+                  location: new-location,
+                  property-type: new-property-type,
+                  total-area: new-total-area,
+                  area-unit: new-area-unit,
+                  last-modified: (get-current-block-height)
+                }
               )
             )
             ;; Update search indexes with new location and type
@@ -557,28 +570,25 @@
   (let ((caller tx-sender))
     (if (not (property-exists? property-id))
       (err ERR-PROPERTY-NOT-FOUND)
-      (if (not (is-authorized caller))
-        (err ERR-UNAUTHORIZED)
-        (let ((verification (map-get? property-verification property-id)))
-          (if (is-none verification)
-            (err ERR-PROPERTY-NOT-FOUND)
-            (let ((current-verification (unwrap verification)))
-              (if (get is-verified current-verification)
-                (err ERR-ALREADY-VERIFIED)
-                (let ((current-time (get-current-block-height)))
-                  (map-set property-verification property-id
-                    (tuple
-                      (is-verified true)
-                      (verified-by caller)
-                      (verification-date current-time)
-                      (verification-notes verification-notes)
-                    )
-                  )
-                  (update-property-timestamp property-id)
-                  ;; Update verified properties count
-                  (var-set total-verified-properties (+ (var-get total-verified-properties) u1))
-                  (ok true)
+      (let ((verification (map-get? property-verification property-id)))
+        (if (is-none verification)
+          (err ERR-PROPERTY-NOT-FOUND)
+          (let ((current-verification (unwrap-panic verification)))
+            (if (get is-verified current-verification)
+              (err ERR-ALREADY-VERIFIED)
+              (let ((current-time (get-current-block-height)))
+                (map-set property-verification property-id
+                  {
+                    is-verified: true,
+                    verified-by: caller,
+                    verification-date: current-time,
+                    verification-notes: verification-notes
+                  }
                 )
+                (update-property-timestamp property-id)
+                ;; Update verified properties count
+                (var-set total-verified-properties (+ (var-get total-verified-properties) u1))
+                (ok true)
               )
             )
           )
@@ -589,11 +599,11 @@
 )
 
 ;; Get property verification status
-(define-public (get-property-verification (property-id uint))
+(define-read-only (get-property-verification (property-id uint))
   (let ((verification (map-get? property-verification property-id)))
     (if (is-none verification)
       (err ERR-PROPERTY-NOT-FOUND)
-      (ok (unwrap verification))
+      (ok (unwrap-panic verification))
     )
   )
 )
@@ -613,15 +623,16 @@
         (err ERR-UNAUTHORIZED)
         (let ((document-id (generate-document-id property-id))
               (current-time (get-current-block-height)))
-          (map-set property-documents property-id document-id
-            (tuple
-              (document-title document-title)
-              (document-type document-type)
-              (document-hash document-hash)
-              (upload-date current-time)
-              (uploaded-by caller)
-              (document-description document-description)
-            )
+          (map-set property-documents 
+            {property-id: property-id, document-id: document-id}
+            {
+              document-title: document-title,
+              document-type: document-type,
+              document-hash: document-hash,
+              upload-date: current-time,
+              uploaded-by: caller,
+              document-description: document-description
+            }
           )
           (update-property-timestamp property-id)
           (ok document-id)
@@ -631,11 +642,16 @@
   )
 )
 
-;; Get property documents
-(define-public (get-property-documents (property-id uint))
+;; Get property document by ID
+(define-read-only (get-property-document (property-id uint) (document-id uint))
   (if (not (property-exists? property-id))
     (err ERR-PROPERTY-NOT-FOUND)
-    (ok (map-get? property-documents property-id))
+    (let ((document (map-get? property-documents {property-id: property-id, document-id: document-id})))
+      (if (is-none document)
+        (err ERR-DOCUMENT-NOT-FOUND)
+        (ok (unwrap-panic document))
+      )
+    )
   )
 )
 
@@ -648,29 +664,26 @@
   (let ((caller tx-sender))
     (if (not (property-exists? property-id))
       (err ERR-PROPERTY-NOT-FOUND)
-      (if (not (is-authorized caller))
-        (err ERR-UNAUTHORIZED)
-        (let ((metadata (map-get? property-metadata property-id)))
-          (if (is-none metadata)
-            (err ERR-PROPERTY-NOT-FOUND)
-            (let ((current-metadata (unwrap metadata))
-                  (current-status (get status current-metadata)))
-              (if (not (is-valid-status-transition current-status new-status))
-                (err ERR-INVALID-STATUS)
-                (begin
-                  ;; Record status change
-                  (record-status-change property-id current-status new-status caller reason)
-                  ;; Update property status
-                  (map-set property-metadata property-id
-                    (merge current-metadata
-                      (tuple
-                        (status new-status)
-                        (last-modified (get-current-block-height))
-                      )
-                    )
+      (let ((metadata (map-get? property-metadata property-id)))
+        (if (is-none metadata)
+          (err ERR-PROPERTY-NOT-FOUND)
+          (let ((current-metadata (unwrap-panic metadata))
+                (current-status (get status current-metadata)))
+            (if (not (is-valid-status-transition current-status new-status))
+              (err ERR-INVALID-STATUS)
+              (begin
+                ;; Record status change
+                (record-status-change property-id current-status new-status caller reason)
+                ;; Update property status
+                (map-set property-metadata property-id
+                  (merge current-metadata
+                    {
+                      status: new-status,
+                      last-modified: (get-current-block-height)
+                    }
                   )
-                  (ok true)
                 )
+                (ok true)
               )
             )
           )
@@ -680,19 +693,16 @@
   )
 )
 
-;; Get property status history
-(define-public (get-property-status-history (property-id uint))
+;; Get property transfer by ID
+(define-read-only (get-property-transfer (property-id uint) (transfer-id uint))
   (if (not (property-exists? property-id))
     (err ERR-PROPERTY-NOT-FOUND)
-    (ok (map-get? property-status-history property-id))
-  )
-)
-
-;; Get property transfer history
-(define-public (get-property-transfer-history (property-id uint))
-  (if (not (property-exists? property-id))
-    (err ERR-PROPERTY-NOT-FOUND)
-    (ok (map-get? property-transfers property-id))
+    (let ((transfer (map-get? property-transfers {property-id: property-id, transfer-id: transfer-id})))
+      (if (is-none transfer)
+        (err ERR-TRANSFER-FAILED)
+        (ok (unwrap-panic transfer))
+      )
+    )
   )
 )
 
@@ -711,14 +721,15 @@
         (if (or (< access-level ACCESS-OWNER) (> access-level ACCESS-PUBLIC))
           (err ERR-INVALID-ACCESS-LEVEL)
           (let ((current-time (get-current-block-height)))
-            (map-set property-access-control property-id accessor
-              (tuple
-                (access-level access-level)
-                (granted-by caller)
-                (granted-date current-time)
-                (expiry-date expiry-date)
-                (is-active true)
-              )
+            (map-set property-access-control 
+              {property-id: property-id, accessor: accessor}
+              {
+                access-level: access-level,
+                granted-by: caller,
+                granted-date: current-time,
+                expiry-date: expiry-date,
+                is-active: true
+              }
             )
             (ok true)
           )
@@ -738,14 +749,13 @@
       (err ERR-PROPERTY-NOT-FOUND)
       (if (not (is-property-owner property-id caller))
         (err ERR-UNAUTHORIZED)
-        (let ((access-control (map-get? property-access-control property-id accessor)))
+        (let ((access-control (map-get? property-access-control {property-id: property-id, accessor: accessor})))
           (if (is-none access-control)
             (err ERR-DOCUMENT-NOT-FOUND)
-            (let ((current-access (unwrap access-control)))
-              (map-set property-access-control property-id accessor
-                (merge current-access
-                  (tuple (is-active false))
-                )
+            (let ((current-access (unwrap-panic access-control)))
+              (map-set property-access-control 
+                {property-id: property-id, accessor: accessor}
+                (merge current-access {is-active: false})
               )
               (ok true)
             )
@@ -756,54 +766,31 @@
   )
 )
 
-;; Search properties by location
-(define-public (search-properties-by-location (location (string-ascii 200)))
-  (ok (map-get? property-location-index location))
+;; Check if property exists in location
+(define-read-only (property-exists-in-location (location (string-ascii 200)) (property-id uint))
+  (default-to false (map-get? property-location-index {location: location, property-id: property-id}))
 )
 
-;; Search properties by type
-(define-public (search-properties-by-type (property-type (string-ascii 50)))
-  (ok (map-get? property-type-index property-type))
+;; Check if property exists of type
+(define-read-only (property-exists-of-type (property-type (string-ascii 50)) (property-id uint))
+  (default-to false (map-get? property-type-index {property-type: property-type, property-id: property-id}))
 )
 
 ;; Get system statistics
-(define-public (get-system-statistics)
-  (ok (tuple
-    (total-properties (var-get total-properties))
-    (total-transfers (var-get total-transfers))
-    (total-verified-properties (var-get total-verified-properties))
-  ))
+(define-read-only (get-system-statistics)
+  (ok {
+    total-properties: (var-get total-properties),
+    total-transfers: (var-get total-transfers),
+    total-verified-properties: (var-get total-verified-properties)
+  })
 )
 
 ;; Get property count
-(define-public (get-property-count)
+(define-read-only (get-property-count)
   (ok (var-get property-counter))
 )
 
 ;; Check property access level
-(define-public (check-property-access (property-id uint) (address principal) (required-level uint))
+(define-read-only (check-property-access (property-id uint) (address principal) (required-level uint))
   (ok (has-access-level property-id address required-level))
-)
-
-;; Get comprehensive property report
-(define-public (get-property-report (property-id uint))
-  (let ((metadata (map-get? property-metadata property-id))
-        (owner (get-property-owner property-id))
-        (verification (map-get? property-verification property-id))
-        (documents (map-get? property-documents property-id))
-        (transfers (map-get? property-transfers property-id))
-        (status-history (map-get? property-status-history property-id)))
-    (if (is-none metadata)
-      (err ERR-PROPERTY-NOT-FOUND)
-      (ok (tuple
-        (property-id property-id)
-        (metadata (unwrap metadata))
-        (owner (unwrap owner))
-        (verification (unwrap verification))
-        (document-count (if (is-some documents) (len (unwrap documents)) u0))
-        (transfer-count (if (is-some transfers) (len (unwrap transfers)) u0))
-        (status-changes (if (is-some status-history) (len (unwrap status-history)) u0))
-      ))
-    )
-  )
 )
