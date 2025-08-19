@@ -140,6 +140,76 @@
   block-height
 )
 
+;; Check if property exists
+(define-private (property-exists? (property-id uint))
+  (is-some (map-get? property-metadata property-id))
+)
+
+;; Get property owner
+(define-private (get-property-owner (property-id uint))
+  (map-get? property-owner property-id)
+)
+
+;; Check if caller is property owner
+(define-private (is-property-owner (property-id uint) (caller principal))
+  (let ((owner (get-property-owner property-id)))
+    (if (is-none owner)
+      false
+      (is-eq (unwrap owner) caller)
+    )
+  )
+)
+
+;; Update property last modified timestamp
+(define-private (update-property-timestamp (property-id uint))
+  (let ((metadata (map-get? property-metadata property-id)))
+    (if (is-some metadata)
+      (let ((current-metadata (unwrap metadata)))
+        (map-set property-metadata property-id
+          (merge current-metadata
+            (tuple (last-modified (get-current-block-height)))
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Record property transfer
+(define-private (record-transfer
+  (property-id uint)
+  (from-owner principal)
+  (to-owner principal)
+  (reason (string-ascii 200))
+  (amount (optional uint))
+)
+  (let ((transfer-id (generate-transfer-id property-id))
+        (current-time (get-current-block-height)))
+    (map-set property-transfers property-id transfer-id
+      (tuple
+        (from-owner from-owner)
+        (to-owner to-owner)
+        (transfer-date current-time)
+        (transfer-reason reason)
+        (transfer-amount amount)
+      )
+    )
+    transfer-id
+  )
+)
+
+;; Update owner properties index
+(define-private (update-owner-properties
+  (old-owner principal)
+  (new-owner principal)
+  (property-id uint)
+)
+  ;; Remove from old owner
+  (map-set owner-properties old-owner property-id false)
+  ;; Add to new owner
+  (map-set owner-properties new-owner property-id true)
+)
+
 ;; =============================================================================
 ;; PUBLIC FUNCTIONS
 ;; =============================================================================
@@ -185,6 +255,111 @@
             )
           )
           (ok property-id)
+        )
+      )
+    )
+  )
+)
+
+;; Transfer property ownership
+(define-public (transfer-property
+  (property-id uint)
+  (new-owner principal)
+  (reason (string-ascii 200))
+  (amount (optional uint))
+)
+  (let ((caller tx-sender))
+    (if (not (property-exists? property-id))
+      (err ERR-PROPERTY-NOT-FOUND)
+      (if (not (is-property-owner property-id caller))
+        (err ERR-UNAUTHORIZED)
+        (if (is-eq caller new-owner)
+          (err ERR-INVALID-OWNER)
+          (let ((current-owner (unwrap (get-property-owner property-id))))
+            ;; Record the transfer
+            (record-transfer property-id current-owner new-owner reason amount)
+            ;; Update ownership
+            (map-set property-owner property-id new-owner)
+            ;; Update owner properties index
+            (update-owner-properties current-owner new-owner property-id)
+            ;; Update timestamp
+            (update-property-timestamp property-id)
+            (ok true)
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Get property information
+(define-public (get-property-info (property-id uint))
+  (let ((metadata (map-get? property-metadata property-id))
+        (owner (get-property-owner property-id)))
+    (if (is-none metadata)
+      (err ERR-PROPERTY-NOT-FOUND)
+      (ok (tuple
+        (property-id property-id)
+        (metadata (unwrap metadata))
+        (owner (unwrap owner))
+      ))
+    )
+  )
+)
+
+;; Get property owner
+(define-public (get-property-owner-public (property-id uint))
+  (let ((owner (get-property-owner property-id)))
+    (if (is-none owner)
+      (err ERR-PROPERTY-NOT-FOUND)
+      (ok (unwrap owner))
+    )
+  )
+)
+
+;; Check if address owns property
+(define-public (owns-property (property-id uint) (address principal))
+  (ok (is-property-owner property-id address))
+)
+
+;; Get properties owned by an address
+(define-public (get-owner-properties (owner principal))
+  (ok (map-get? owner-properties owner))
+)
+
+;; Update property metadata (only by owner)
+(define-public (update-property-metadata
+  (property-id uint)
+  (new-title (string-ascii 100))
+  (new-description (string-ascii 500))
+  (new-location (string-ascii 200))
+  (new-property-type (string-ascii 50))
+  (new-total-area uint)
+  (new-area-unit (string-ascii 20))
+)
+  (let ((caller tx-sender))
+    (if (not (property-exists? property-id))
+      (err ERR-PROPERTY-NOT-FOUND)
+      (if (not (is-property-owner property-id caller))
+        (err ERR-UNAUTHORIZED)
+        (if (not (validate-property-data new-title new-description new-location new-property-type new-total-area new-area-unit))
+          (err ERR-INVALID-PROPERTY-DATA)
+          (let ((current-metadata (unwrap (map-get? property-metadata property-id))))
+            (map-set property-metadata property-id
+              (merge current-metadata
+                (tuple
+                  (property-title new-title)
+                  (property-description new-description)
+                  (location new-location)
+                  (property-type new-property-type)
+                  (total-area new-total-area)
+                  (area-unit new-area-unit)
+                  (last-modified (get-current-block-height))
+                )
+              )
+            )
+            (ok true)
+          )
         )
       )
     )
