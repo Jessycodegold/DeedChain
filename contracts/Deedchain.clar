@@ -17,12 +17,20 @@
 (define-constant ERR-ALREADY-VERIFIED u1008)
 (define-constant ERR-NOT-VERIFIED u1009)
 (define-constant ERR-INVALID-STATUS u1010)
+(define-constant ERR-INVALID-ACCESS-LEVEL u1011)
+(define-constant ERR-DOCUMENT-NOT-FOUND u1012)
 
 ;; Property status codes
 (define-constant STATUS-ACTIVE u1)
 (define-constant STATUS-PENDING u2)
 (define-constant STATUS-SUSPENDED u3)
 (define-constant STATUS-ARCHIVED u4)
+
+;; Access level codes
+(define-constant ACCESS-OWNER u1)
+(define-constant ACCESS-VERIFIER u2)
+(define-constant ACCESS-ADMIN u3)
+(define-constant ACCESS-PUBLIC u4)
 
 ;; Maximum values
 (define-constant MAX-PROPERTY-DESCRIPTION-LENGTH u500)
@@ -133,6 +141,38 @@
   (property-id uint)
   (counter uint)
 )
+
+;; Access control for properties
+(define-map property-access-control
+  (property-id uint)
+  (accessor principal)
+  (tuple
+    (access-level uint)
+    (granted-by principal)
+    (granted-date uint)
+    (expiry-date (optional uint))
+    (is-active bool)
+  )
+)
+
+;; Property search index by location
+(define-map property-location-index
+  (location (string-ascii 200))
+  (property-id uint)
+  (is-active bool)
+)
+
+;; Property search index by type
+(define-map property-type-index
+  (property-type (string-ascii 50))
+  (property-id uint)
+  (is-active bool)
+)
+
+;; System statistics
+(define-data-var total-properties uint u0)
+(define-data-var total-transfers uint u0)
+(define-data-var total-verified-properties uint u0)
 
 ;; =============================================================================
 ;; PRIVATE FUNCTIONS
@@ -309,6 +349,42 @@
   )
 )
 
+;; Check access level for property
+(define-private (has-access-level (property-id uint) (caller principal) (required-level uint))
+  (cond
+    ;; Owner has full access
+    ((is-property-owner property-id caller) true)
+    ;; Check specific access control
+    (true
+      (let ((access-control (map-get? property-access-control property-id caller)))
+        (if (is-none access-control)
+          false
+          (let ((access-info (unwrap access-control)))
+            (and
+              (get is-active access-info)
+              (>= (get access-level access-info) required-level)
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Update search indexes
+(define-private (update-search-indexes (property-id uint) (location (string-ascii 200)) (property-type (string-ascii 50)) (is-active bool))
+  (map-set property-location-index location property-id is-active)
+  (map-set property-type-index property-type property-id is-active)
+)
+
+;; Update system statistics
+(define-private (update-statistics (property-id uint) (is-verified bool))
+  (var-set total-properties (+ (var-get total-properties) u1))
+  (if is-verified
+    (var-set total-verified-properties (+ (var-get total-verified-properties) u1))
+  )
+)
+
 ;; =============================================================================
 ;; PUBLIC FUNCTIONS
 ;; =============================================================================
@@ -353,6 +429,10 @@
               (verification-notes "")
             )
           )
+          ;; Update search indexes
+          (update-search-indexes property-id location property-type true)
+          ;; Update statistics
+          (update-statistics property-id false)
           (ok property-id)
         )
       )
@@ -383,6 +463,8 @@
             (update-owner-properties current-owner new-owner property-id)
             ;; Update timestamp
             (update-property-timestamp property-id)
+            ;; Update transfer statistics
+            (var-set total-transfers (+ (var-get total-transfers) u1))
             (ok true)
           )
         )
@@ -457,6 +539,8 @@
                 )
               )
             )
+            ;; Update search indexes with new location and type
+            (update-search-indexes property-id new-location new-property-type true)
             (ok true)
           )
         )
@@ -491,6 +575,8 @@
                     )
                   )
                   (update-property-timestamp property-id)
+                  ;; Update verified properties count
+                  (var-set total-verified-properties (+ (var-get total-verified-properties) u1))
                   (ok true)
                 )
               )
@@ -607,5 +693,117 @@
   (if (not (property-exists? property-id))
     (err ERR-PROPERTY-NOT-FOUND)
     (ok (map-get? property-transfers property-id))
+  )
+)
+
+;; Grant access to property
+(define-public (grant-property-access
+  (property-id uint)
+  (accessor principal)
+  (access-level uint)
+  (expiry-date (optional uint))
+)
+  (let ((caller tx-sender))
+    (if (not (property-exists? property-id))
+      (err ERR-PROPERTY-NOT-FOUND)
+      (if (not (is-property-owner property-id caller))
+        (err ERR-UNAUTHORIZED)
+        (if (or (< access-level ACCESS-OWNER) (> access-level ACCESS-PUBLIC))
+          (err ERR-INVALID-ACCESS-LEVEL)
+          (let ((current-time (get-current-block-height)))
+            (map-set property-access-control property-id accessor
+              (tuple
+                (access-level access-level)
+                (granted-by caller)
+                (granted-date current-time)
+                (expiry-date expiry-date)
+                (is-active true)
+              )
+            )
+            (ok true)
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Revoke access to property
+(define-public (revoke-property-access
+  (property-id uint)
+  (accessor principal)
+)
+  (let ((caller tx-sender))
+    (if (not (property-exists? property-id))
+      (err ERR-PROPERTY-NOT-FOUND)
+      (if (not (is-property-owner property-id caller))
+        (err ERR-UNAUTHORIZED)
+        (let ((access-control (map-get? property-access-control property-id accessor)))
+          (if (is-none access-control)
+            (err ERR-DOCUMENT-NOT-FOUND)
+            (let ((current-access (unwrap access-control)))
+              (map-set property-access-control property-id accessor
+                (merge current-access
+                  (tuple (is-active false))
+                )
+              )
+              (ok true)
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Search properties by location
+(define-public (search-properties-by-location (location (string-ascii 200)))
+  (ok (map-get? property-location-index location))
+)
+
+;; Search properties by type
+(define-public (search-properties-by-type (property-type (string-ascii 50)))
+  (ok (map-get? property-type-index property-type))
+)
+
+;; Get system statistics
+(define-public (get-system-statistics)
+  (ok (tuple
+    (total-properties (var-get total-properties))
+    (total-transfers (var-get total-transfers))
+    (total-verified-properties (var-get total-verified-properties))
+  ))
+)
+
+;; Get property count
+(define-public (get-property-count)
+  (ok (var-get property-counter))
+)
+
+;; Check property access level
+(define-public (check-property-access (property-id uint) (address principal) (required-level uint))
+  (ok (has-access-level property-id address required-level))
+)
+
+;; Get comprehensive property report
+(define-public (get-property-report (property-id uint))
+  (let ((metadata (map-get? property-metadata property-id))
+        (owner (get-property-owner property-id))
+        (verification (map-get? property-verification property-id))
+        (documents (map-get? property-documents property-id))
+        (transfers (map-get? property-transfers property-id))
+        (status-history (map-get? property-status-history property-id)))
+    (if (is-none metadata)
+      (err ERR-PROPERTY-NOT-FOUND)
+      (ok (tuple
+        (property-id property-id)
+        (metadata (unwrap metadata))
+        (owner (unwrap owner))
+        (verification (unwrap verification))
+        (document-count (if (is-some documents) (len (unwrap documents)) u0))
+        (transfer-count (if (is-some transfers) (len (unwrap transfers)) u0))
+        (status-changes (if (is-some status-history) (len (unwrap status-history)) u0))
+      ))
+    )
   )
 )
